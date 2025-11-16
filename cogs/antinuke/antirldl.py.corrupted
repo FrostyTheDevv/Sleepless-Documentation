@@ -1,0 +1,329 @@
+import discord
+from discord.ext import commands
+import aiosqlite
+import asyncio
+from utils.action_tracker import ActionTracker
+
+
+
+class AntiRoleDelete(commands.Cog):class AntiRoleDelete(commands.Cog):
+
+    def __init__(self, bot):    def __init__(self, bot):
+
+        self.bot = bot        self.bot = bot
+
+        self.tracker = ActionTracker()        self.tracker = ActionTracker()
+
+                
+
+    async def cog_load(self):    async def cog_load(self):
+
+        await self.tracker.initialize()        """Initialize the action tracker when cog loads"""
+
+            await self.tracker.initialize()
+
+    async def cog_unload(self):    
+
+        await self.tracker.close()    async def cog_unload(self):
+
+        """Clean up when cog unloads"""
+
+    async def is_blacklisted_guild(self, guild_id):        await self.tracker.close()
+
+        async with aiosqlite.connect('db/block.db') as block_db:
+
+            cursor = await block_db.execute(    async def is_blacklisted_guild(self, guild_id):
+
+                "SELECT 1 FROM guild_blacklist WHERE guild_id = ?",         async with aiosqlite.connect('db/block.db') as block_db:
+
+                (str(guild_id),)            cursor = await block_db.execute("SELECT 1 FROM guild_blacklist WHERE guild_id = ?", (str(guild_id),))
+
+            )            return await cursor.fetchone() is not None
+
+            return await cursor.fetchone() is not None
+
+    async def fetch_audit_logs(self, guild, action):
+
+    async def fetch_audit_logs(self, guild, action):        if not guild.me.guild_permissions.ban_members:
+
+        if not guild.me.guild_permissions.view_audit_log:            return None
+
+            return []        try:
+
+                    async for entry in guild.audit_logs(action=action, limit=1):
+
+        try:                now = datetime.datetime.now(pytz.utc)
+
+            entries = []                created_at = entry.created_at
+
+            async for entry in guild.audit_logs(action=action, limit=10):                difference = (now - created_at).total_seconds() * 1000
+
+                entries.append(entry)
+
+            return entries                if difference >= 3600000:
+
+        except Exception:                    return None
+
+            return []                return entry
+
+        except Exception:
+
+    async def is_whitelisted(self, guild_id: int, user_id: int) -> bool:            pass
+
+        async with aiosqlite.connect('db/anti.db') as db:        return None
+
+            cursor = await db.execute(
+
+                "SELECT 1 FROM extraowners WHERE guild_id = ? AND owner_id = ?",    def can_fetch_audit(self, guild_id, event_name, max_requests=5, interval=10, cooldown_duration=300):
+
+                (guild_id, user_id)        now = datetime.datetime.now()
+
+            )        self.event_limits.setdefault(guild_id, {}).setdefault(event_name, []).append(now)
+
+            if await cursor.fetchone():
+
+                return True        timestamps = self.event_limits[guild_id][event_name]
+
+                    timestamps = [t for t in timestamps if (now - t).total_seconds() <= interval]
+
+            cursor = await db.execute(        self.event_limits[guild_id][event_name] = timestamps
+
+                "SELECT rldl FROM whitelisted_users WHERE guild_id = ? AND user_id = ?",
+
+                (guild_id, user_id)        if guild_id in self.cooldowns and event_name in self.cooldowns[guild_id]:
+
+            )            if (now - self.cooldowns[guild_id][event_name]).total_seconds() < cooldown_duration:
+
+            result = await cursor.fetchone()                return False
+
+            return bool(result and result[0])            del self.cooldowns[guild_id][event_name]
+
+
+
+    @commands.Cog.listener()        if len(timestamps) > max_requests:
+
+    async def on_guild_role_delete(self, role):            self.cooldowns.setdefault(guild_id, {})[event_name] = now
+
+        guild = role.guild            return False
+
+        
+
+        if await self.is_blacklisted_guild(guild.id):        return True
+
+            return
+
+            @commands.Cog.listener()
+
+        async with aiosqlite.connect('db/anti.db') as db:    async def on_guild_role_delete(self, role):
+
+            cursor = await db.execute(        guild = role.guild
+
+                "SELECT status FROM antinuke WHERE guild_id = ?",        if await self.is_blacklisted_guild(guild.id):
+
+                (guild.id,)            return
+
+            )
+
+            status = await cursor.fetchone()        async with aiosqlite.connect('db/anti.db') as db:
+
+            if not status or not status[0]:            async with db.execute("SELECT status FROM antinuke WHERE guild_id = ?", (guild.id,)) as cursor:
+
+                return                antinuke_status = await cursor.fetchone()
+
+                    if not antinuke_status or not antinuke_status[0]:
+
+        audit_entries = await self.fetch_audit_logs(guild, discord.AuditLogAction.role_delete)                return
+
+        if not audit_entries:
+
+            return        if not self.can_fetch_audit(guild.id, 'role_delete'):
+
+                    return
+
+        delete_entry = None
+
+        for entry in audit_entries:        log_entry = await self.fetch_audit_logs(guild, discord.AuditLogAction.role_delete)
+
+            if entry.target.id == role.id:        if log_entry is None:
+
+                delete_entry = entry            return
+
+                break
+
+                executor = log_entry.user
+
+        if not delete_entry:
+
+            return        if executor.id in {guild.owner_id, self.bot.user.id}:
+
+                    return
+
+        executor = delete_entry.user
+
+                async with aiosqlite.connect('db/anti.db') as db:
+
+        if executor.id in {guild.owner_id, self.bot.user.id}:            async with db.execute("SELECT owner_id FROM extraowners WHERE guild_id = ? AND owner_id = ?", 
+
+            return                                  (guild.id, executor.id)) as cursor:
+
+                        extra_owner_status = await cursor.fetchone()
+
+        if await self.is_whitelisted(guild.id, executor.id):            if extra_owner_status:
+
+            return                return
+
+        
+
+        await self.tracker.track_action(            async with db.execute("SELECT rldl FROM whitelisted_users WHERE guild_id = ? AND user_id = ?", 
+
+            guild_id=guild.id,                                  (guild.id, executor.id)) as cursor:
+
+            user_id=executor.id,                whitelist_status = await cursor.fetchone()
+
+            action_type="role_delete",            if whitelist_status and whitelist_status[0]:
+
+            metadata={                return
+
+                "role_id": role.id,
+
+                "role_name": role.name,        await self.ban_executor_and_recreate_role(guild, executor, role)
+
+                "role_position": role.position,        await asyncio.sleep(2)
+
+                "role_color": str(role.color),
+
+                "role_permissions": role.permissions.value,    async def ban_executor_and_recreate_role(self, guild, executor, role):
+
+                "role_hoist": role.hoist,        retries = 3
+
+                "role_mentionable": role.mentionable,        while retries > 0:
+
+                "reason": delete_entry.reason            try:
+
+            }                await self.ban_executor(guild, executor)
+
+        )                await self.recreate_role(guild, role)
+
+                        return
+
+        exceeded, action_count, config = await self.tracker.check_threshold(            except discord.Forbidden:
+
+            guild_id=guild.id,                return
+
+            user_id=executor.id,            except discord.HTTPException as e:
+
+            action_type="role_delete"                if e.status == 429:
+
+        )                    retry_after = e.response.headers.get('Retry-After')
+
+                            if retry_after:
+
+        if exceeded:                        await asyncio.sleep(float(retry_after))
+
+            await self.apply_punishment(guild, executor, role, action_count, config)                        retries -= 1
+
+                else:
+
+    async def apply_punishment(self, guild, executor, last_deleted_role, action_count, config):                    return
+
+        try:            except discord.errors.RateLimited as e:
+
+            await guild.ban(                await asyncio.sleep(e.retry_after)
+
+                executor,                retries -= 1
+
+                reason=f"Threshold exceeded: {action_count} role deletions (limit: {config.limit} in {config.time_window}s)"            except Exception:
+
+            )                return
+
+                    return
+
+            recent_actions = await self.tracker.get_recent_actions(
+
+                guild_id=guild.id,    async def ban_executor(self, guild, executor):
+
+                user_id=executor.id,        retries = 3
+
+                action_type="role_delete",        while retries > 0:
+
+                time_window=config.time_window            try:
+
+            )                await guild.ban(executor, reason="Role Delete | Unwhitelisted User")
+
+                            return
+
+            recreated_count = 0            except discord.Forbidden:
+
+            for action in recent_actions:                return
+
+                if action.reverted:            except discord.HTTPException as e:
+
+                    continue                if e.status == 429:
+
+                                    retry_after = e.response.headers.get('Retry-After')
+
+                try:                    if retry_after:
+
+                    await guild.create_role(                        await asyncio.sleep(float(retry_after))
+
+                        name=action.metadata.get("role_name", "Deleted Role"),                        retries -= 1
+
+                        permissions=discord.Permissions(action.metadata.get("role_permissions", 0)),                else:
+
+                        color=discord.Color(int(action.metadata.get("role_color", "#000000").replace("#", ""), 16)),                    return
+
+                        hoist=action.metadata.get("role_hoist", False),            except discord.errors.RateLimited as e:
+
+                        mentionable=action.metadata.get("role_mentionable", False),                await asyncio.sleep(e.retry_after)
+
+                        reason=f"Recreating role deleted by {executor} (threshold breach)"                retries -= 1
+
+                    )            except Exception:
+
+                    recreated_count += 1                return
+
+                    await asyncio.sleep(0.5)        return
+
+                except Exception as e:
+
+                    print(f"Failed to recreate role: {e}")    async def recreate_role(self, guild, role):
+
+                    try:
+
+            await self.tracker.mark_actions_reverted(            await guild.create_role(
+
+                guild_id=guild.id,                name=role.name,
+
+                user_id=executor.id,                permissions=role.permissions,
+
+                action_type="role_delete"                color=role.color,
+
+            )                hoist=role.hoist,
+
+                            mentionable=role.mentionable,
+
+            await self.tracker.log_punishment(                reason="Role deleted by unwhitelisted user"
+
+                guild_id=guild.id,            )
+
+                user_id=executor.id,        except discord.Forbidden:
+
+                action_type="role_delete",            return
+
+                punishment_type=config.punishment_type,        except discord.HTTPException as e:
+
+                actions_reverted=recreated_count,            if e.status == 429:
+
+                reason=f"Deleted {action_count} roles in {config.time_window} seconds"                retry_after = e.response.headers.get('Retry-After')
+
+            )                if retry_after:
+
+                                await asyncio.sleep(float(retry_after))
+
+        except Exception as e:        except Exception:
+
+            print(f"Error applying punishment in antirldl: {e}")            return
+
+
+async def setup(bot):
+    await bot.add_cog(AntiRoleDelete(bot))
